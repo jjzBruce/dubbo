@@ -286,12 +286,10 @@ public class ExtensionLoader<T> {
     }
 
     /**
-     *
      * <ul>
      *  <li>根据扩展实现名称找到扩展实现对象，如果找不到抛出 {@link IllegalStateException} 异常</li>
      *
      * </ul>
-     *
      */
     @SuppressWarnings("unchecked")
     public T getExtension(String name) {
@@ -343,7 +341,7 @@ public class ExtensionLoader<T> {
     }
 
     /**
-     * 获取受支持的扩展实现全类名
+     * 获取受支持的扩展的关键字
      */
     public Set<String> getSupportedExtensions() {
         Map<String, Class<?>> clazzes = getExtensionClasses();
@@ -359,11 +357,15 @@ public class ExtensionLoader<T> {
     }
 
     /**
-     * Register new extension via API
+     * 注册一个新的扩展实现类
+     * <ol>
+     *     <li>如果不是 {@link Adaptive}，校验是否重名</li>
+     *     <li>如果 {@link Adaptive}，无需扩展名，检查 {@link ExtensionLoader#cachedAdaptiveClass} 是否存在，将类赋值给 {@link ExtensionLoader#cachedAdaptiveClass}</li>
+     * </ol>
      *
-     * @param name  extension name
-     * @param clazz extension class
-     * @throws IllegalStateException when extension with the same name has already been registered.
+     * @param name  extension name  扩展名
+     * @param clazz extension class 扩展实现类
+     * @throws IllegalStateException when extension with the same name has already been registered. 扩展名不允许重复
      */
     public void addExtension(String name, Class<?> clazz) {
         getExtensionClasses(); // load classes
@@ -398,10 +400,10 @@ public class ExtensionLoader<T> {
     }
 
     /**
-     * Replace the existing extension via API
+     * 替换扩展实现类，一般扩展实现需要指定扩展名，适配器扩展不需要指定扩展名
      *
-     * @param name  extension name
-     * @param clazz extension class
+     * @param name  extension name 扩展名
+     * @param clazz extension class 扩展实现类
      * @throws IllegalStateException when extension to be placed doesn't exist
      * @deprecated not recommended any longer, and use only when test
      */
@@ -440,6 +442,9 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 获取自适应扩展类
+     */
     @SuppressWarnings("unchecked")
     public T getAdaptiveExtension() {
         Object instance = cachedAdaptiveInstance.get();
@@ -449,6 +454,7 @@ public class ExtensionLoader<T> {
                     instance = cachedAdaptiveInstance.get();
                     if (instance == null) {
                         try {
+                            // 创建扩展适配对象
                             instance = createAdaptiveExtension();
                             cachedAdaptiveInstance.set(instance);
                         } catch (Throwable t) {
@@ -492,7 +498,11 @@ public class ExtensionLoader<T> {
 
     /**
      * 创建扩展对象
-     *
+     * <ol>
+     *     <li>创建对象实例，如果缓存存在则取缓存。</li>
+     *     <li>对扩展对象进行依赖注入。</li>
+     *     <li>如果存在包装器实现，则通过包装器的有参构造函数创建包装器对象。包装器如果存在多个，则遍历所有的包装器依次通过构造函数来创建，最终形成像链条一样。最后再次执行依赖注入。</li>
+     * </ol>
      */
     @SuppressWarnings("unchecked")
     private T createExtension(String name) {
@@ -766,6 +776,9 @@ public class ExtensionLoader<T> {
         return extension.value();
     }
 
+    /**
+     * 创建扩展适配对象
+     */
     @SuppressWarnings("unchecked")
     private T createAdaptiveExtension() {
         try {
@@ -783,15 +796,30 @@ public class ExtensionLoader<T> {
         return cachedAdaptiveClass = createAdaptiveExtensionClass();
     }
 
+    /**
+     * 创建适配器类
+     */
     private Class<?> createAdaptiveExtensionClass() {
+        // 生成类代码字符
         String code = createAdaptiveExtensionClassCode();
+        // 找到相关类加载器
         ClassLoader classLoader = findClassLoader();
+        // 编译
         com.alibaba.dubbo.common.compiler.Compiler compiler = ExtensionLoader.getExtensionLoader(com.alibaba.dubbo.common.compiler.Compiler.class).getAdaptiveExtension();
+        // 返回类
         return compiler.compile(code, classLoader);
     }
 
+    /**
+     * 自适应扩展代码生成
+     *
+     */
     private String createAdaptiveExtensionClassCode() {
         StringBuilder codeBuilder = new StringBuilder();
+
+        // 通过反射检测接口方法是否包含 Adaptive 注解
+        // 对于要生成自适应拓展的接口，Dubbo 要求该接口至少有一个方法被 Adaptive 注解修饰。
+        // 若不满足此条件，就会抛出运行时异常。
         Method[] methods = type.getMethods();
         boolean hasAdaptiveAnnotation = false;
         for (Method m : methods) {
@@ -816,37 +844,49 @@ public class ExtensionLoader<T> {
             Adaptive adaptiveAnnotation = method.getAnnotation(Adaptive.class);
             StringBuilder code = new StringBuilder(512);
             if (adaptiveAnnotation == null) {
+                // Dubbo 不会为没有标注 Adaptive 注解的方法生成代理逻辑，对于该种类型的方法，仅会生成一句抛出异常的代码。
                 code.append("throw new UnsupportedOperationException(\"method ")
                         .append(method.toString()).append(" of interface ")
                         .append(type.getName()).append(" is not adaptive method!\");");
             } else {
                 int urlTypeIndex = -1;
+                // 遍历参数列表，确定 URL 参数位置
                 for (int i = 0; i < pts.length; ++i) {
                     if (pts[i].equals(URL.class)) {
                         urlTypeIndex = i;
                         break;
                     }
                 }
-                // found parameter in URL type
+                // urlTypeIndex != -1，表示参数列表中存在 URL 参数
                 if (urlTypeIndex != -1) {
-                    // Null Point check
+                    // 为 URL 类型参数生成判空代码，格式如下：
+                    // if (arg + urlTypeIndex == null)
+                    //     throw new IllegalArgumentException("url == null");
                     String s = String.format("\nif (arg%d == null) throw new IllegalArgumentException(\"url == null\");",
                             urlTypeIndex);
                     code.append(s);
 
+                    // 为 URL 类型参数生成赋值代码，形如 URL url = arg1
                     s = String.format("\n%s url = arg%d;", URL.class.getName(), urlTypeIndex);
                     code.append(s);
                 }
-                // did not find parameter in URL type
+                // 参数列表中不存在 URL 类型参数
                 else {
                     String attribMethod = null;
 
-                    // find URL getter method
                     LBL_PTS:
+                    // 遍历方法的参数类型列表
                     for (int i = 0; i < pts.length; ++i) {
+                        // 获取某一类型参数的全部方法
                         Method[] ms = pts[i].getMethods();
+                        // 遍历方法列表，寻找可返回 URL 的 getter 方法
                         for (Method m : ms) {
                             String name = m.getName();
+                            // 1. 方法名以 get 开头，或方法名大于3个字符
+                            // 2. 方法的访问权限为 public
+                            // 3. 非静态方法
+                            // 4. 方法参数数量为0
+                            // 5. 方法返回值类型为 URL
                             if ((name.startsWith("get") || name.length() > 3)
                                     && Modifier.isPublic(m.getModifiers())
                                     && !Modifier.isStatic(m.getModifiers())
@@ -859,64 +899,110 @@ public class ExtensionLoader<T> {
                         }
                     }
                     if (attribMethod == null) {
+                        // 如果所有参数中均不包含可返回 URL 的 getter 方法，则抛出异常
                         throw new IllegalStateException("fail to create adaptive class for interface " + type.getName()
                                 + ": not found url parameter or url attribute in parameters of method " + method.getName());
                     }
 
-                    // Null point check
+                    // 为可返回 URL 的参数生成判空代码，格式如下：
+                    // if (arg + urlTypeIndex == null)
+                    //     throw new IllegalArgumentException("参数全限定名 + argument == null");
                     String s = String.format("\nif (arg%d == null) throw new IllegalArgumentException(\"%s argument == null\");",
                             urlTypeIndex, pts[urlTypeIndex].getName());
                     code.append(s);
+
+                    // 为 getter 方法返回的 URL 生成判空代码，格式如下：
+                    // if (argN.getter方法名() == null)
+                    //     throw new IllegalArgumentException(参数全限定名 + argument getUrl() == null);
                     s = String.format("\nif (arg%d.%s() == null) throw new IllegalArgumentException(\"%s argument %s() == null\");",
                             urlTypeIndex, attribMethod, pts[urlTypeIndex].getName(), attribMethod);
                     code.append(s);
 
+                    // 生成赋值语句，格式如下：
+                    // URL全限定名 url = argN.getter方法名()，比如
+                    // com.alibaba.dubbo.common.URL url = invoker.getUrl();
                     s = String.format("%s url = arg%d.%s();", URL.class.getName(), urlTypeIndex, attribMethod);
                     code.append(s);
                 }
 
+                // 获取 Adaptive 注解值
+                // Adaptive 注解值 value 类型为 String[]，可填写多个值，默认情况下为空数组。
+                // 若 value 为非空数组，直接获取数组内容即可。若 value 为空数组，则需进行额外处理。
+                // 处理过程是将类名转换为字符数组，然后遍历字符数组，并将字符放入 StringBuilder 中。
+                // 若字符为大写字母，则向 StringBuilder 中添加点号，随后将字符变为小写存入 StringBuilder 中。比如 LoadBalance 经过处理后，得到 load.balance。
                 String[] value = adaptiveAnnotation.value();
                 // value is not set, use the value generated from class name as the key
                 if (value.length == 0) {
+                    // 获取类名，并将类名转换为字符数组
                     char[] charArray = type.getSimpleName().toCharArray();
                     StringBuilder sb = new StringBuilder(128);
+                    // 遍历字节数组
                     for (int i = 0; i < charArray.length; i++) {
+                        // 检测当前字符是否为大写字母
                         if (Character.isUpperCase(charArray[i])) {
                             if (i != 0) {
+                                // 向 sb 中添加点号
                                 sb.append(".");
                             }
+                            // 将字符变为小写，并添加到 sb 中
                             sb.append(Character.toLowerCase(charArray[i]));
                         } else {
+                            // 添加字符到 sb 中
                             sb.append(charArray[i]);
                         }
                     }
                     value = new String[]{sb.toString()};
                 }
 
+                // 检测 Invocation 参数
                 boolean hasInvocation = false;
                 for (int i = 0; i < pts.length; ++i) {
+                    // // 判断当前参数名称是否等于 com.alibaba.dubbo.rpc.Invocation
                     if (pts[i].getName().equals("com.alibaba.dubbo.rpc.Invocation")) {
-                        // Null Point check
+                        // 为 Invocation 类型参数生成判空代码
                         String s = String.format("\nif (arg%d == null) throw new IllegalArgumentException(\"invocation == null\");", i);
                         code.append(s);
+                        // 生成 getMethodName 方法调用代码，格式为：
+                        //    String methodName = argN.getMethodName();
                         s = String.format("\nString methodName = arg%d.getMethodName();", i);
                         code.append(s);
+
+                        // 设置 hasInvocation 为 true
                         hasInvocation = true;
                         break;
                     }
                 }
 
+                // 生成拓展名获取逻辑
+                // 设置默认拓展名，cachedDefaultName 源于 SPI 注解值，默认情况下，
+                // SPI 注解值为空串，此时 cachedDefaultName = null
                 String defaultExtName = cachedDefaultName;
                 String getNameCode = null;
+
+                // 遍历 value，这里的 value 是 Adaptive 的注解值
+                // 此处循环目的是生成从 URL 中获取拓展名的代码，生成的代码会赋值给 getNameCode 变量。
+                // 注意这个循环的遍历顺序是由后向前遍历的。
                 for (int i = value.length - 1; i >= 0; --i) {
                     if (i == value.length - 1) {
+                        // 默认拓展名非空
                         if (null != defaultExtName) {
+                            // protocol 是 url 的一部分，可通过 getProtocol 方法获取，其他的则是从
+                            // URL 参数中获取。因为获取方式不同，所以这里要判断 value[i] 是否为 protocol
                             if (!"protocol".equals(value[i]))
+                                // hasInvocation 用于标识方法参数列表中是否有 Invocation 类型参数
                                 if (hasInvocation)
+                                    // 生成的代码功能等价于下面的代码：
+                                    //   url.getMethodParameter(methodName, value[i], defaultExtName)
+                                    // 以 LoadBalance 接口的 select 方法为例，最终生成的代码如下：
+                                    //   url.getMethodParameter(methodName, "loadbalance", "random")
                                     getNameCode = String.format("url.getMethodParameter(methodName, \"%s\", \"%s\")", value[i], defaultExtName);
                                 else
+                                    // 生成的代码功能等价于下面的代码：
+                                    //   url.getParameter(value[i], defaultExtName)
                                     getNameCode = String.format("url.getParameter(\"%s\", \"%s\")", value[i], defaultExtName);
                             else
+                                // 生成的代码功能等价于下面的代码：
+                                //   ( url.getProtocol() == null ? defaultExtName : url.getProtocol() )
                                 getNameCode = String.format("( url.getProtocol() == null ? \"%s\" : url.getProtocol() )", defaultExtName);
                         } else {
                             if (!"protocol".equals(value[i]))
