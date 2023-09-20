@@ -286,8 +286,12 @@ public class ExtensionLoader<T> {
     }
 
     /**
-     * Find the extension with the given name. If the specified name is not found, then {@link IllegalStateException}
-     * will be thrown.
+     *
+     * <ul>
+     *  <li>根据扩展实现名称找到扩展实现对象，如果找不到抛出 {@link IllegalStateException} 异常</li>
+     *
+     * </ul>
+     *
      */
     @SuppressWarnings("unchecked")
     public T getExtension(String name) {
@@ -306,6 +310,7 @@ public class ExtensionLoader<T> {
             synchronized (holder) {
                 instance = holder.get();
                 if (instance == null) {
+                    // 创建扩展实现对象
                     instance = createExtension(name);
                     holder.set(instance);
                 }
@@ -337,6 +342,9 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 获取受支持的扩展实现全类名
+     */
     public Set<String> getSupportedExtensions() {
         Map<String, Class<?>> clazzes = getExtensionClasses();
         return Collections.unmodifiableSet(new TreeSet<String>(clazzes.keySet()));
@@ -482,6 +490,10 @@ public class ExtensionLoader<T> {
         return new IllegalStateException(buf.toString());
     }
 
+    /**
+     * 创建扩展对象
+     *
+     */
     @SuppressWarnings("unchecked")
     private T createExtension(String name) {
         Class<?> clazz = getExtensionClasses().get(name);
@@ -508,6 +520,12 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 扩展依赖注入
+     * <ul>
+     *     <li> 方法上标注{@link DisableInject}就不进行扩展注入 </li>
+     * </ul>
+     */
     private T injectExtension(T instance) {
         try {
             if (objectFactory != null) {
@@ -552,12 +570,16 @@ public class ExtensionLoader<T> {
         return clazz;
     }
 
+    /**
+     * 获取扩展实现类映射(全类名 -> 类)
+     */
     private Map<String, Class<?>> getExtensionClasses() {
         Map<String, Class<?>> classes = cachedClasses.get();
         if (classes == null) {
             synchronized (cachedClasses) {
                 classes = cachedClasses.get();
                 if (classes == null) {
+                    // 加载扩展实现类映射(全类名 -> 类)
                     classes = loadExtensionClasses();
                     cachedClasses.set(classes);
                 }
@@ -566,10 +588,14 @@ public class ExtensionLoader<T> {
         return classes;
     }
 
-    // synchronized in getExtensionClasses
+    /**
+     * synchronized in getExtensionClasses
+     * 加载扩展类映射(全类名 -> 类)
+     */
     private Map<String, Class<?>> loadExtensionClasses() {
         final SPI defaultAnnotation = type.getAnnotation(SPI.class);
         if (defaultAnnotation != null) {
+            // 默认实现
             String value = defaultAnnotation.value();
             if ((value = value.trim()).length() > 0) {
                 String[] names = NAME_SEPARATOR.split(value);
@@ -580,7 +606,7 @@ public class ExtensionLoader<T> {
                 if (names.length == 1) cachedDefaultName = names[0];
             }
         }
-
+        // 从目录中读取并加载扩展类映射(全类名 -> 类)
         Map<String, Class<?>> extensionClasses = new HashMap<String, Class<?>>();
         loadDirectory(extensionClasses, DUBBO_INTERNAL_DIRECTORY);
         loadDirectory(extensionClasses, DUBBO_DIRECTORY);
@@ -588,6 +614,7 @@ public class ExtensionLoader<T> {
         return extensionClasses;
     }
 
+    // 从目录中加载扩展类映射(全类名 -> 类)
     private void loadDirectory(Map<String, Class<?>> extensionClasses, String dir) {
         String fileName = dir + type.getName();
         try {
@@ -601,6 +628,7 @@ public class ExtensionLoader<T> {
             if (urls != null) {
                 while (urls.hasMoreElements()) {
                     java.net.URL resourceURL = urls.nextElement();
+                    // 加载资源，加载扩展类映射(全类名 -> 类)
                     loadResource(extensionClasses, classLoader, resourceURL);
                 }
             }
@@ -610,6 +638,13 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 读取资源完成加载扩展类映射(全类名 -> 类)
+     *
+     * @param extensionClasses 扩展类映射(全类名 -> 类)
+     * @param classLoader      类加载器
+     * @param resourceURL      资源URL
+     */
     private void loadResource(Map<String, Class<?>> extensionClasses, ClassLoader classLoader, java.net.URL resourceURL) {
         try {
             BufferedReader reader = new BufferedReader(new InputStreamReader(resourceURL.openStream(), "utf-8"));
@@ -628,6 +663,7 @@ public class ExtensionLoader<T> {
                                 line = line.substring(i + 1).trim();
                             }
                             if (line.length() > 0) {
+                                // 通过全类名加载成类之后，再执行填充扩展类映射(全类名 -> 类)
                                 loadClass(extensionClasses, resourceURL, Class.forName(line, true, classLoader), name);
                             }
                         } catch (Throwable t) {
@@ -645,13 +681,23 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 填充扩展类映射(全类名 -> 类)数据
+     *
+     * @param extensionClasses 扩展类映射
+     * @param resourceURL      资源URL
+     * @param clazz            扩展实现类
+     * @param name             全类名
+     */
     private void loadClass(Map<String, Class<?>> extensionClasses, java.net.URL resourceURL, Class<?> clazz, String name) throws NoSuchMethodException {
+        // 验证：类扩展实现类(clazz)必须继承或实现自type
         if (!type.isAssignableFrom(clazz)) {
             throw new IllegalStateException("Error when load extension class(interface: " +
                     type + ", class line: " + clazz.getName() + "), class "
                     + clazz.getName() + "is not subtype of interface.");
         }
         if (clazz.isAnnotationPresent(Adaptive.class)) {
+            // 当前实现类被标注为适配类(Adaptive)，将当前实现类赋值给当前扩展加载对象的 cachedAdaptiveClass 缓存
             if (cachedAdaptiveClass == null) {
                 cachedAdaptiveClass = clazz;
             } else if (!cachedAdaptiveClass.equals(clazz)) {
@@ -695,6 +741,9 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 是否为包装类
+     */
     private boolean isWrapperClass(Class<?> clazz) {
         try {
             clazz.getConstructor(type);
